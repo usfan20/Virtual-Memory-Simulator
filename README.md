@@ -16,4 +16,4 @@ A high-fidelity simulation of a 32-bit Virtual Memory System, designed to analyz
 
 ## Configuration
 
-The system is configured via `config.txt`. and `trace.txt` are uploaded with project you may edit the values inside:
+The system is configured via `config.txt`. and `trace.txt` are uploaded with project you may edit the values inside.Visual Studio 2022 was used for compiling and running the project.
