@@ -3,23 +3,58 @@
 #include <sstream>
 #include <string>
 #include <iostream>
-#include<list>
-#include<unordered_map>
-#include<deque>
+#include <list>
+#include <unordered_map>
+#include <deque>
+#include <cmath>
 using namespace std;
+
 struct SystemConfig {
-    uint32_t ramSize;     // e.g., 256KB to 2GB 
-    uint32_t pageSize;    // e.g., 1KB to 64KB
-    uint32_t tlbSize;     // e.g., 4 to 512 
+    uint32_t ramSize = 524288;   // default 512KB
+    uint32_t pageSize = 4096;     // default 4KB
+    uint32_t tlbSize = 16;       // default 16 entries
 
     double tlbLatency = 1.0;
     double ramLatency = 100.0;
-    double diskLatency = 10000000.0;
+    double diskLatency = 1000.0;
 
-    uint32_t Shift() const { return log2(pageSize); }
-    uint32_t Mask() const { return pageSize - 1; }
-    uint32_t getTotalFrames() const { return ramSize / pageSize; }
+    uint32_t Shift() const {
+        return (uint32_t)log2((double)pageSize);
+    }
+    uint32_t Mask() const {
+        return pageSize - 1;
+    }
+    uint32_t getTotalFrames() const {
+        return ramSize / pageSize;
+    }
+
+    // Validate config values after loading
+    bool validate() const {
+        if (ramSize == 0) {
+            cerr << "Error: RAM_SIZE cannot be 0!" << endl;
+            return false;
+        }
+        if (pageSize == 0) {
+            cerr << "Error: PAGE_SIZE cannot be 0!" << endl;
+            return false;
+        }
+        if (tlbSize == 0) {
+            cerr << "Error: TLB_SIZE cannot be 0!" << endl;
+            return false;
+        }
+        if (ramSize < pageSize) {
+            cerr << "Error: RAM_SIZE must be >= PAGE_SIZE!" << endl;
+            return false;
+        }
+        // Check page size is power of 2
+        if ((pageSize & (pageSize - 1)) != 0) {
+            cerr << "Error: PAGE_SIZE must be a power of 2!" << endl;
+            return false;
+        }
+        return true;
+    }
 };
+
 class ConfigParser {
 public:
     static SystemConfig loadConfig(const string& filename) {
@@ -28,7 +63,8 @@ public:
         string line;
 
         if (!file.is_open()) {
-            cerr << "Error: Could not open config file!" << endl;
+            cerr << "Error: Could not open config file: " << filename << endl;
+            cerr << "Using default configuration." << endl;
             return config;
         }
 
@@ -36,67 +72,116 @@ public:
             // Skip comments or empty lines
             if (line.empty() || line[0] == '#') continue;
 
+            // Trim whitespace
+            line.erase(0, line.find_first_not_of(" \t"));
+            line.erase(line.find_last_not_of(" \t\r\n") + 1);
+
             istringstream is_line(line);
             string key;
 
-            // Split at the colon
             if (getline(is_line, key, ':')) {
                 string value;
                 if (getline(is_line, value)) {
-                    if (key == "RAM_SIZE") config.ramSize = stoul(value);
-                    else if (key == "PAGE_SIZE") config.pageSize = stoul(value);
-                    else if (key == "TLB_SIZE") config.tlbSize = stoul(value);
-                    else if (key == "TLB_LATENCY") config.tlbLatency = stod(value);
-                    else if (key == "RAM_LATENCY") config.ramLatency = stod(value);
-                    else if (key == "DISK_LATENCY") config.diskLatency = stod(value);
+                    // Trim value whitespace
+                    value.erase(0, value.find_first_not_of(" \t"));
+                    value.erase(value.find_last_not_of(" \t\r\n") + 1);
+
+                    try {
+                        if (key == "RAM_SIZE")    config.ramSize = stoul(value);
+                        else if (key == "PAGE_SIZE")   config.pageSize = stoul(value);
+                        else if (key == "TLB_SIZE")    config.tlbSize = stoul(value);
+                        else if (key == "TLB_LATENCY") config.tlbLatency = stod(value);
+                        else if (key == "RAM_LATENCY") config.ramLatency = stod(value);
+                        else if (key == "DISK_LATENCY")config.diskLatency = stod(value);
+                    }
+                    catch (...) {
+                        cerr << "Warning: Could not parse config value for key: " << key << endl;
+                    }
                 }
             }
         }
+
+        // Validate after loading
+        if (!config.validate()) {
+            cerr << "Error: Invalid configuration. Exiting." << endl;
+            exit(1);
+        }
+
+        cout << "Config loaded: RAM=" << config.ramSize
+            << "B, PageSize=" << config.pageSize
+            << "B, TLBSize=" << config.tlbSize
+            << ", Frames=" << config.getTotalFrames() << endl;
+
         return config;
     }
 
-    static unordered_map<uint32_t, std::deque<int>> preScanTrace(std::string filename, uint32_t shift) {
-        unordered_map<uint32_t, std::deque<int>> futureUses;
+    static unordered_map<uint32_t, deque<int>> preScanTrace(
+        const string& filename, uint32_t shift)
+    {
+        unordered_map<uint32_t, deque<int>> futureUses;
         ifstream file(filename);
         string line;
         int lineCount = 0;
 
         if (!file.is_open()) {
-            std::cerr << "Error: Could not open trace file for pre-scan!" << std::endl;
+            cerr << "Error: Could not open trace file for pre-scan: " << filename << endl;
             return futureUses;
         }
 
-        while (std::getline(file, line)) {
+        while (getline(file, line)) {
             if (line.empty()) continue;
-
-
-            uint32_t addr = std::stoul(line.substr(0, line.find(' ')), nullptr, 16);
-            uint32_t vpn = addr >> shift;
-
-            futureUses[vpn].push_back(lineCount);
-            lineCount++;
-
-
+            try {
+                size_t spacePos = line.find(' ');
+                if (spacePos == string::npos) continue;
+                uint32_t addr = stoul(line.substr(0, spacePos), nullptr, 16);
+                uint32_t vpn = addr >> shift;
+                futureUses[vpn].push_back(lineCount);
+                lineCount++;
+            }
+            catch (...) {
+                cerr << "Warning: Skipping malformed line in pre-scan: " << line << endl;
+            }
         }
+
+        cout << "Pre-scan complete. Unique VPNs found: " << futureUses.size() << endl;
         return futureUses;
     }
 };
+
 class StatsReport {
 public:
     long totalAccesses = 0;
-    long tlbHits = 0, ptHits = 0, pageFaults = 0, diskWrites = 0;
+    long tlbHits = 0;
+    long ptHits = 0;
+    long pageFaults = 0;
+    long diskWrites = 0;
     long long totalTimeNs = 0;
 
     void printReport() {
-        std::cout << "\n    Performance Report    \n";
-        std::cout << "Total Accesses: " << totalAccesses << "\n";
-        std::cout << "TLB Hit Ratio: " << (double)tlbHits / totalAccesses * 100 << "%\n";
-        std::cout << "Page Faults: " << pageFaults << " (Rate: " << (double)pageFaults / totalAccesses * 100 << "%)\n";
-        std::cout << "Disk Writes: " << diskWrites << "\n";
-        std::cout << "Simulated Time: " << totalTimeNs << " ns\n";
-        std::cout << "EAT: " << totalTimeNs / totalAccesses << " ns\n";
+      
+        cout << "  ------  Performance Report  ------   \n";
+       
+
+        if (totalAccesses == 0) {
+            cout << "No accesses recorded.\n";
+            return;
+        }
+
+        double tlbHitRatio = (double)tlbHits / totalAccesses * 100.0;
+        double ptHitRatio = (double)ptHits / totalAccesses * 100.0;
+        double faultRate = (double)pageFaults / totalAccesses * 100.0;
+        double eat = (double)totalTimeNs / totalAccesses;
+
+        cout << "Total Accesses   : " << totalAccesses << "\n";
+        cout << "TLB Hits         : " << tlbHits
+            << " (Hit Ratio: " << tlbHitRatio << "%)\n";
+        cout << "Page Table Hits  : " << ptHits
+            << " (Hit Ratio: " << ptHitRatio << "%)\n";
+        cout << "Page Faults      : " << pageFaults
+            << " (Fault Rate: " << faultRate << "%)\n";
+        cout << "Disk Writes      : " << diskWrites << "\n";
+        cout << "Simulated Time   : " << totalTimeNs << " ns\n";
+        cout << "EAT              : " << eat << " ns\n";
+        cout << "==============================\n";
     }
-
-
-
 };
