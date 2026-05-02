@@ -1,11 +1,11 @@
 #pragma once
 #include <iostream>
-#include<list>
-#include<unordered_map>
-#include<deque>
-#include "TLB & PTE.cpp"
-#include "ReplacementAlgorithm.cpp"
-#include "Config & Stats.cpp"
+#include <list>
+#include <unordered_map>
+#include <deque>
+#include "TLB & PTE.h"
+#include "ReplacementAlgorithm.h"
+#include "Config & Stats.h"
 
 class MMU {
     SystemConfig config;
@@ -15,7 +15,6 @@ class MMU {
     ReplacementAlgorithm* replacer;
     list<uint32_t> freeFrames;
 
-    //handle page faults
     void handlePageFault(uint32_t vpn) {
         stats.pageFaults++;
         stats.totalTimeNs += config.diskLatency;
@@ -26,52 +25,71 @@ class MMU {
             freeFrames.pop_front();
         }
         else {
-            // 4. Eviction Logic 
+            // Eviction Logic
             uint32_t victimVpn = replacer->getVictim();
-            if (pageTable[victimVpn].dirty) {
-                stats.diskWrites++;
-                stats.totalTimeNs += config.diskLatency; // disk has to be accessed to write because dirty bit
+
+            // Safety check — victim must exist in page table
+            if (pageTable.find(victimVpn) == pageTable.end()) {
+                cerr << "Warning: Victim VPN not found in page table!" << endl;
+                assignedFrame = 0; // fallback
             }
-            assignedFrame = pageTable[victimVpn].frameNumber;
-            pageTable[victimVpn].valid = false;
-            tlb.invalidate(victimVpn);
+            else {
+                if (pageTable[victimVpn].dirty) {
+                    stats.diskWrites++;
+                    stats.totalTimeNs += config.diskLatency; // dirty write-back penalty
+                }
+                assignedFrame = pageTable[victimVpn].frameNumber;
+                pageTable[victimVpn].valid = false;
+                tlb.invalidate(victimVpn);
+            }
         }
 
+        // Load new page into assigned frame
         pageTable[vpn] = { assignedFrame, true, false };
     }
 
 public:
     MMU(SystemConfig c, StatsReport& s, ReplacementAlgorithm* r)
         : config(c), stats(s), tlb(c.tlbSize), replacer(r) {
-        for (uint32_t i = 0; i < config.getTotalFrames(); ++i) freeFrames.push_back(i);
+        for (uint32_t i = 0; i < config.getTotalFrames(); ++i)
+            freeFrames.push_back(i);
     }
+
     void access(uint32_t virtualAddress, bool isWrite) {
-        stats.totalAccesses++; // every time it is called it total access are incremented
+        stats.totalAccesses++;
+
         uint32_t vpn = virtualAddress >> config.Shift();
         uint32_t offset = virtualAddress & config.Mask();
+       
+
         int frame = tlb.lookup(vpn);
-        stats.totalAccesses += config.tlbLatency;
+
         if (frame != -1) {
+            // TLB Hit — fastest path
             stats.tlbHits++;
+            stats.totalTimeNs += config.tlbLatency;
         }
-        else { // Search if it exists in pagetable and if data is valid
-            if (pageTable.count(vpn) && pageTable[vpn].valid)
-            {
+        else {
+            // TLB Miss — must search page table
+            stats.totalTimeNs += config.tlbLatency; 
+
+            if (pageTable.count(vpn) && pageTable[vpn].valid) {
+                // Page Table Hit
                 stats.ptHits++;
                 stats.totalTimeNs += config.ramLatency;
                 frame = pageTable[vpn].frameNumber;
                 tlb.update(vpn, frame);
             }
-            else {  //pagefault
+            else {
+                // Page Fault
+                stats.totalTimeNs += config.ramLatency; // loading page into RAM
                 handlePageFault(vpn);
                 frame = pageTable[vpn].frameNumber;
                 tlb.update(vpn, frame);
-
             }
         }
+
         if (isWrite) pageTable[vpn].dirty = true;
         replacer->updateUsage(vpn);
-
-
     }
 };
